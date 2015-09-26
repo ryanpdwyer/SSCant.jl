@@ -1,10 +1,14 @@
 module SSCant
 
+using PyCall
+
 import ForwardDiff
 import ODE
 import CurveFit
 import DSP
 import Dierckx
+
+@pyimport pmefm
 
 function unwrap(v, inplace=false)
   # currently assuming an array
@@ -36,16 +40,17 @@ type CantileverParams
     C_1::Float64
     R_1::Float64
     tau_s::Float64
+    T::Float64
 end
 
 function CantileverParams(;f_c=0.05, Q=1000., k=1.,
-                 C_z=1e-8, C_zz=1e-10, C_b=0.1,
+                 C_z=1.6e-4, C_zz=-1.6e-5, C_b=0.1,
                  R_t=1e-4, C_1=600., R_1=3e-6,
-                 tau_s=15e3)
+                 tau_s=15e3, T=293.)
     CantileverParams(f_c, Q, k,
                  C_z, C_zz, C_b,
                  R_t, C_1, R_1,
-                 tau_s)
+                 tau_s, T)
 end
 
 
@@ -148,6 +153,7 @@ end
 
 type TimeSeries
     cp::CantileverParams
+    y0
     t
     x
     v
@@ -162,7 +168,7 @@ type TimeSeries
 end
 
 
-function TimeSeries(cp::CantileverParams, t, y)
+function TimeSeries(cp::CantileverParams, y0, t, y)
     x = y[:, 1]
     v = y[:, 2]
     q_t = y[:, 3]
@@ -172,22 +178,17 @@ function TimeSeries(cp::CantileverParams, t, y)
     phi = phase(x, v, f_c=cp.f_c)
     dphi, df, f0 = fit_phase(t, phi)
 
-    TimeSeries(cp, t, x, v, q_t, q_1, x_5,
+    TimeSeries(cp, y0, t, x, v, q_t, q_1, x_5,
                A, phi, dphi, df, f0)
 end
 
 type ResampledTimeSeries
     cp::CantileverParams
-    _t
-    _x
-    _v
-    _q_t
-    _q_1
-    _x_5
+    ts::TimeSeries
     dt
+    m
     t
     x
-    v
     A
     phi
     dphi
@@ -195,11 +196,12 @@ type ResampledTimeSeries
     f0
 end
 
-function ResampledTimeSeries(ts::TimeSeries, dt)
-    # Resample x, v using 3rd order spline interpolation
-    # Create z (fir hilbert filter)
-    # Use z to calculate A, phi, dphi, df, f0
-end
+# function ResampledTimeSeries(ts::TimeSeries, T_pre, dt)
+#     spline = Dierckx.Spline1D(ts.t, ts.x, k=3)
+#     t = -T_pre:dt:T
+#     x = A0 * pi(2*ts.f_c)
+#     x = Dierckx.evaluate(spline, t)
+# end
 
 
 function squeeze_y(y)
@@ -226,13 +228,179 @@ Params
 - y0: array containing [x, v, q_t, q_1, x_5] at time zero
       The units are µm, µm / µs, pC, pC, unitless (percentage change)
 """
-function run_sscant(cp::CantileverParams, y0, t_range; F=u, V=u, U=u, args...)
+# function run_sscant(cp::CantileverParams, y0, t_range; F=u, V=u, U=u, args...)
+
+#     F, F_tx = ss_cant(cp, F, V, U)
+#     jac_t = ss_jacobian(F)
+#     t, _y = ODE.ode23s(F_tx, y0, t_range, jacobian=jac_t; args...)
+#     y = squeeze_y(_y)
+
+#     TimeSeries(cp, y0, t, y)
+# end
+
+# function resample_sscant(cp::CantileverParams, A0, phi0, T_pre, T, dt; V_t0=0, V_10=0, alpha_0=0, F=u, V=u, U=u, args...)
+#     fs = 1/dt
+#     N_pre = round(Int, T_pre / dt)
+#     t_pre = collect((-N_pre:0) * dt)
+#     x_pre = A0 * cospi(2*cp.f_c*t_pre + 2*phi0)
+
+#     F, F_tx = ss_cant(cp, F, V, U)
+#     jac_t = ss_jacobian(F)
+#     y0 = [x_pre[end], 2*pi*cp.f_c*A0*sinpi(2*phi0),
+#           V_t0 * cp.C_b, V_10 * cp.C_1, alpha_0]
+
+#     t, _y = ODE.ode23s(F_tx, y0, [0., T], jacobian=jac_t; maxstep=dt*0.5, args...)
+#     y = squeeze_y(_y)
+
+#     ts = TimeSeries(cp, y0, t, y)
+#     N_post = trunc(Int, T / dt)
+#     t_post = collect((1:N_post) * dt)
+#     spline = Dierckx.Spline1D(ts.t, ts.x, k=3)
+#     t = [t_pre; t_post]
+#     x = [x_pre; Dierckx.evaluate(spline, t_post)]
+
+#     li = pmefm.LockIn(t, x, fs)
+
+#     li[:lock](bw_ratio=0.25, coeff_ratio=5., window="blackmanharris")
+
+#     ResampledTimeSeries(cp, ts, dt, li[:m], t, x, li[:A],
+#                         li[:phi], li[:dphi], li[:df], li[:f0])
+
+# end
+
+function resample_sscant_sim(cp::CantileverParams, y0::Array{Float64,1},
+                             T_pre::Float64,
+                             T::Float64, dt::Float64;
+                             F=u, V=u, U=u, coeff_ratio=8., args...)
+    fs = 1/dt
+
     F, F_tx = ss_cant(cp, F, V, U)
     jac_t = ss_jacobian(F)
-    t, _y = ODE.ode23s(F_tx, y0, t_range, jacobian=jac_t; args...)
+
+
+    t, _y = ODE.ode23s(F_tx, y0, [-T_pre, T], jacobian=jac_t; maxstep=dt*0.5, args...)
     y = squeeze_y(_y)
 
-    TimeSeries(cp, t, y)
+    ts = TimeSeries(cp, y0, t, y)
+
+    spline = Dierckx.Spline1D(ts.t, ts.x, k=3)
+    t = collect(-T_pre:dt:T)
+    x = Dierckx.evaluate(spline, t)
+
+    li = pmefm.LockIn(t, x, fs)
+
+    li[:lock2](fp_ratio=0.1, fc_ratio=0.4, coeff_ratio=coeff_ratio, window="blackman")
+    li[:autophase](tf=0.)
+
+    ResampledTimeSeries(cp, ts, dt, li[:m], t, x, li[:A],
+                        li[:phi], li[:dphi], li[:df], li[:f0])
+
 end
+
+
+
+
+
+# Since a discrete delta function has a magnitude $\delta[0] = 1/\Delta t$,
+# we can model the thermal force on the cantilever as a random,
+# Gaussian force with,
+
+# $$\sigma = \sqrt{\frac{k_c k_B T}{\pi Q f_c \Delta t}}$$
+# (see doi:10.1088/0034-4885/29/1/306).
+
+function resample_sscant_noise(cp::CantileverParams, y0::Array{Float64,1},
+                             T_pre::Float64,
+                             T::Float64, dt::Float64;
+                             V=u, U=u, coeff_ratio=8., seed=-1, args...)
+    fs = 1/dt
+    k_B = 1.38064852e-11
+
+    dt_force = 0.05/cp.f_c
+    sigma = sqrt(cp.k*k_B*cp.T/(pi*cp.Q*cp.f_c*dt_force))
+    if seed > 0
+        srand(seed)
+    end
+    N_force = round(Int, T/dt_force)+1
+
+
+    F_spline = Dierckx.Spline1D(linspace(0, T, N_force), randn(N_force) * sigma,
+                              k=1)
+
+    function F(t)
+        Dierckx.evaluate(F_spline, t)
+    end
+
+
+    Fx, F_tx = ss_cant(cp, F, V, U)
+    jac_t = ss_jacobian(Fx)
+
+    t, _y = ODE.ode23s(F_tx, y0, [-T_pre, T], jacobian=jac_t; maxstep=dt*0.5, args...)
+    y = squeeze_y(_y)
+
+    ts = TimeSeries(cp, y0, t, y)
+
+    spline = Dierckx.Spline1D(ts.t, ts.x, k=3)
+    t = collect(-T_pre:dt:T)
+    x = Dierckx.evaluate(spline, t)
+
+    li = pmefm.LockIn(t, x, fs)
+
+    li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
+               coeff_ratio=coeff_ratio, window="blackman")
+    li[:autophase](tf=0.)
+
+    ResampledTimeSeries(cp, ts, dt, li[:m], t, x, li[:A],
+                        li[:phi], li[:dphi], li[:df], li[:f0])
+
+end
+
+# Another idea would be to "remember" the last value the 
+
+function resample_sscant_noise3(cp::CantileverParams, y0::Array{Float64,1},
+                             T_pre::Float64,
+                             T::Float64, dt::Float64;
+                             V=u, U=u, coeff_ratio=8., seed=-1, args...)
+    fs = 1/dt
+    k_B = 1.38064852e-11
+
+    dt_force = 0.05/cp.f_c
+    sigma = sqrt(cp.k*k_B*cp.T/(pi*cp.Q*cp.f_c*dt_force))
+    if seed > 0
+        srand(seed)
+    end
+    N_force = round(Int, T/dt_force)+1
+
+
+    F_spline = Dierckx.Spline1D(linspace(0, T, N_force), randn(N_force) * sigma,
+                              k=3)
+
+    function F(t)
+        Dierckx.evaluate(F_spline, t)
+    end
+
+
+    Fx, F_tx = ss_cant(cp, F, V, U)
+    jac_t = ss_jacobian(Fx)
+
+    t, _y = ODE.ode23s(F_tx, y0, [-T_pre, T], jacobian=jac_t; maxstep=dt*0.5, args...)
+    y = squeeze_y(_y)
+
+    ts = TimeSeries(cp, y0, t, y)
+
+    spline = Dierckx.Spline1D(ts.t, ts.x, k=3)
+    t = collect(-T_pre:dt:T)
+    x = Dierckx.evaluate(spline, t)
+
+    li = pmefm.LockIn(t, x, fs)
+
+    li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
+               coeff_ratio=coeff_ratio, window="blackman")
+    li[:autophase](tf=0.)
+
+    ResampledTimeSeries(cp, ts, dt, li[:m], t, x, li[:A],
+                        li[:phi], li[:dphi], li[:df], li[:f0])
+
+end
+
 
 end # module
