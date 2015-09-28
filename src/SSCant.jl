@@ -290,7 +290,7 @@ function resample_sscant_sim(cp::CantileverParams, y0::Array{Float64,1},
     li = pmefm.LockIn(t, x, fs)
 
     li[:lock2](fp_ratio=0.1, fc_ratio=0.4, coeff_ratio=coeff_ratio, window="blackman")
-    li[:autophase](tf=0.)
+    li[:phase](tf=0.)
 
     ResampledTimeSeries(cp, ts, dt, li[:m], t, x, li[:A],
                         li[:phi], li[:dphi], li[:df], li[:f0])
