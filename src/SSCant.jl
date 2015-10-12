@@ -10,25 +10,22 @@ import Dierckx
 
 @pyimport lockin
 
-function unwrap(v, inplace=false)
-  # currently assuming an array
-  unwrapped = inplace ? v : copy(v)
-  for i in 2:length(v)
-    while unwrapped[i] - unwrapped[i-1] >= pi
-      unwrapped[i] -= 2pi
-    end
-    while unwrapped[i] - unwrapped[i-1] <= -pi
-      unwrapped[i] += 2pi
-    end
-  end
-  return unwrapped
-end
-
-unwrap!(v) = unwrap(v, true)
-
 @doc """Zero function""" ->
 u(t) = 0
 
+
+doc"""
+- f_c: cantilever frequency (0.05 MHz)
+- Q:  quality factor (1000)
+- k: spring constant (1 µN/µm)
+- C_z: first derivative of tip capacitance (1e-6 pF / µm)
+- C_zz: second derivative of tip capacitance (-1e-5 pF / µm)
+- C_b: cantilever body capacitance (0.1 pF)
+- R_t: Cantilever tip capacitance (1e-4 Mohm)
+- C_1: C1 capacitance (600 pF)
+- R_1: R1 resistance (3e-6 Mohm)
+- tau_s: sample response time (15e3 us)
+"""
 immutable CantileverParams
     f_c::Float64
     Q::Float64
@@ -42,6 +39,7 @@ immutable CantileverParams
     tau_s::Float64
     T::Float64
 end
+
 
 function CantileverParams(;f_c=0.05, Q=1000., k=1.,
                  C_z=1.6e-4, C_zz=-1.6e-5, C_b=0.1,
@@ -158,7 +156,7 @@ function phase(x, v; omega_c=nothing, f_c=nothing)
     if omega_c == nothing
         omega_c = 2 * pi * f_c
     end
-    unwrap(atan2(-v./omega_c, x))
+    DSP.unwrap(atan2(-v./omega_c, x))
 end
 
 function fit_phase(t, phi)
@@ -416,7 +414,7 @@ function chunk_sscant_sim(cant::CantileverParams, y0::Array{Float64,1},
 
     tout = slock[:get_t]()
     A = abs(slock[:output])
-    phi = unwrap(angle(slock[:z]))
+    phi = DSP.unwrap(angle(slock[:z]))
     df = zeros(phi)
     df[2:end] = diff(phi)
 
@@ -782,7 +780,7 @@ function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Fl
 
     force(t) = t >= 0. ? randn() * sigma : 0.
 
-    dec = trunc(Int, fs / f_dec)
+    Ndec = trunc(Int, fs / f_dec)
 
     Tendpts = collect(-T_pre:Tchunk:T)
     if Tendpts[end] != T
@@ -810,21 +808,21 @@ function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Fl
         y0 = _y[end]
 
         spline = Dierckx.Spline1D(t, y[:, 1], k=3)
-        t_equal = Tendpts[i]:dt:Tendpts[i+1]
-        x = zeros(t_equal)
-        for i = eachindex(x)
-            x[i] = Dierckx.evaluate(spline, t_equal[i]) + randn()*sigma_x
-        end
+
+        # may need to revert these changes for some unknown reason.
+
+        t_equal = collect(Tendpts[i]:dt:Tendpts[i+1])
+        x = Dierckx.evaluate(spline, t_equal) + randn(size(t_equal))*sigma_x
 
         if i == 1
             push!(t_save, t[1])
             push!(y_save, _y[1])
-            global li = lockin.LockIn(collect(t_equal), x, fs)
+            global li = lockin.LockIn(t_equal, x, fs)
             li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
                        coeff_ratio=coeff_ratio, window="blackman")
             li[:phase](tf=0.)
 
-            global slock = lockin.FIRStateLock(li[:b], dec, li[:f0],
+            global slock = lockin.FIRStateLock(li[:b], Ndec, li[:f0],
                                         -li[:mb][end], t0=-T_pre, fs=fs)
 
             slock[:filt](x)
@@ -850,7 +848,7 @@ function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Fl
     df[2:end] = diff(phi) / (2pi)
     df[1] = df[2]
 
-    DownsampledTimeSeriesRaw(cant, y0, t_save, y_save_sq, dt, fs / dec,
+    DownsampledTimeSeriesRaw(cant, y0, t_save, y_save_sq, dt, fs / Ndec,
                           slock[:f0], slock[:phi0], tout,
                           A, phi, df)
 end
