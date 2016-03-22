@@ -4,9 +4,13 @@ using PyCall
 
 import ForwardDiff
 import ODE
-import CurveFit
 import DSP
 import Dierckx
+
+@doc "Fits a straight line through a set of points, `y = a₁ + a₂ * x`
+
+From CurveFit.jl." ->
+linear_fit(x, y) = hcat(ones(x), x) \ y
 
 @pyimport lockin
 
@@ -160,7 +164,7 @@ function phase(x, v; omega_c=nothing, f_c=nothing)
 end
 
 function fit_phase(t, phi)
-    mb = CurveFit.linear_fit(t, phi)
+    mb = linear_fit(t, phi)
     dphi = phi - (t * mb[2] + mb[1])
     df = zeros(size(dphi))
     df[2:end] = diff(dphi)
