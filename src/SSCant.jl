@@ -1,18 +1,16 @@
 module SSCant
 
 using PyCall
-
 import ForwardDiff
 import ODE
 import DSP
 import Dierckx
+@pyimport lockin
 
 @doc "Fits a straight line through a set of points, `y = a₁ + a₂ * x`
 
 From CurveFit.jl." ->
 linear_fit(x, y) = hcat(ones(x), x) \ y
-
-@pyimport lockin
 
 @doc """Zero function""" ->
 u(t) = 0
@@ -224,30 +222,30 @@ end
 
 immutable DownsampledTimeSeries
     cant::CantileverParams
-    y0::Array{Float64,1}
+    y0::Vector{Float64}
     dt0::Float64
     fs::Float64
     f0::Float64
     phi0::Float64
-    t::Array{Float64,1}
-    A::Array{Float64,1}
-    phi::Array{Float64,1}
-    df::Array{Float64,1}
+    t::Vector{Float64}
+    A::Vector{Float64}
+    phi::Vector{Float64}
+    df::Vector{Float64}
 end
 
 immutable DownsampledTimeSeriesRaw
     cant::CantileverParams
-    y0::Array{Float64,1}
-    t_raw::Array{Float64,1}
+    y0::Vector{Float64}
+    t_raw::Vector{Float64}
     y_raw::Array{Float64,2}
     dt0::Float64
     fs::Float64
     f0::Float64
     phi0::Float64
-    t::Array{Float64,1}
-    A::Array{Float64,1}
-    phi::Array{Float64,1}
-    df::Array{Float64,1}
+    t::Vector{Float64}
+    A::Vector{Float64}
+    phi::Vector{Float64}
+    df::Vector{Float64}
 end
 
 # function ResampledTimeSeries(ts::TimeSeries, T_pre, dt)
@@ -322,7 +320,7 @@ Params
 
 # end
 
-function resample_sscant_sim(cant::CantileverParams, y0::Array{Float64,1},
+function resample_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              F=u, V=u, U=u, coeff_ratio=8., args...)
@@ -349,7 +347,7 @@ function resample_sscant_sim(cant::CantileverParams, y0::Array{Float64,1},
 
 end
 
-function raw_sscant_sim(cant::CantileverParams, y0::Array{Float64,1},
+function raw_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              F=u, V=u, U=u, coeff_ratio=8., args...)
@@ -377,7 +375,7 @@ function make_Ftx_jac(ss_cant::Function, cant::CantileverParams,
     return F_tx, jac
 end
 
-function chunk_sscant_sim(cant::CantileverParams, y0::Array{Float64,1},
+function chunk_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              F=u, V=u, U=u, coeff_ratio=8.,
@@ -429,7 +427,7 @@ end
 
 
 
-function downsample_sscant_sim(cant::CantileverParams, y0::Array{Float64,1},
+function downsample_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              F=u, V=u, U=u, coeff_ratio=8.,
@@ -466,14 +464,14 @@ end
 
 # type DownsampledTimeSeries
 #     cant::CantileverParams
-#     y0::Array{Float64,1}
+#     y0::Vector{Float64}
 #     dt0::Float64
 #     fs::Float64
 #     f0::Float64
-#     t::Array{Float64,1}
-#     A::Array{Float64,1}
-#     phi::Array{Float64,1}
-#     df::Array{Float64,1}
+#     t::Vector{Float64}
+#     A::Vector{Float64}
+#     phi::Vector{Float64}
+#     df::Vector{Float64}
 # end
 
 # Since a discrete delta function has a magnitude $\delta[0] = 1/\Delta t$,
@@ -483,7 +481,7 @@ end
 # $$\sigma = \sqrt{\frac{k_c k_B T}{\pi Q f_c \Delta t}}$$
 # (see doi:10.1088/0034-4885/29/1/306).
 
-function resample_sscant_noise(cant::CantileverParams, y0::Array{Float64,1},
+function resample_sscant_noise(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              V=u, U=u, coeff_ratio=8., seed=-1, args...)
@@ -530,7 +528,7 @@ end
 
 # Another idea would be to "remember" the last value the 
 
-function re_down_sscant_noise3(cant::CantileverParams, y0::Array{Float64,1},
+function re_down_sscant_noise3(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              V=u, U=u, coeff_ratio=8., seed=-1, args...)
@@ -585,7 +583,7 @@ function re_down_sscant_noise3(cant::CantileverParams, y0::Array{Float64,1},
 
 end
 
-function down_sscant_noise3(cant::CantileverParams, y0::Array{Float64,1},
+function down_sscant_noise3(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              V=u, U=u, coeff_ratio=8., seed=-1, args...)
@@ -637,7 +635,7 @@ function down_sscant_noise3(cant::CantileverParams, y0::Array{Float64,1},
 
 end
 
-function sscant_noise3(cant::CantileverParams, y0::Array{Float64,1},
+function sscant_noise3(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
                              V=u, U=u, coeff_ratio=8., seed=-1, args...)
@@ -857,7 +855,7 @@ function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Fl
                           A, phi, df)
 end
 
-function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Array{Float64,1},
+function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64; xdot::Function=ss_cant_1tc,
                               V=u, U=u, coeff_ratio=8.,
@@ -932,7 +930,7 @@ function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Array{Float64,1}
                           A, phi, df)
 end
 
-function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Array{Float64,1},
+function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64, dt_out::Float64;
                              xdot::Function=ss_cant_1tc,
@@ -957,8 +955,8 @@ function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Array{Float64
         push!(Tendpts, T)
     end
 
-    t_collected = Array{Float64,1}()
-    x_collected = Array{Float64,1}()
+    t_collected = Vector{Float64}()
+    x_collected = Vector{Float64}()
     for i = 1:length(Tendpts)-1
         N = round(Int, (Tendpts[i+1] - Tendpts[i])/dt_force) + 1
         t_force = linspace(Tendpts[i], Tendpts[i+1], N)
