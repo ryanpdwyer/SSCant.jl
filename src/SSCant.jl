@@ -1,6 +1,7 @@
 module SSCant
 
 using PyCall
+using ProgressMeter
 import ForwardDiff
 import ODE
 import DSP
@@ -94,7 +95,7 @@ function ss_cant_1tc(f_c=0.05, Q=1000., k=1,
     F_x(x) = [x[2], (
             -omega_c^2 * x[1] - omega_r * x[2]
             - C_z/(2mC_b2) * (1 + x[5]) * x[3]^2
-            - C_zz/(2mC_b2)* (1 + x[5]) * x[1]*x[3]^2),
+            - C_zz/(2mC_b2) * (1 + x[5]) * x[1]*x[3]^2),
                 
             (-omega_tb * x[3]
             + C_z/(R_t * C_b^2) * (1 + x[5]) * x[1] * x[3]
@@ -115,7 +116,7 @@ function ss_cant_1tc(f_c=0.05, Q=1000., k=1,
     F_x, F_tx
 end
 
-ss_cant_1tc(cant::CantileverParams, F::Function=u, V::Function=u, U::Function=u) = ss_cant_1tc(cant.f_c,
+ss_cant_1tc(cant::CantileverParams, F=u, V=u, U=u) = ss_cant_1tc(cant.f_c,
     cant.Q, cant.k, cant.C_z, cant.C_zz, cant.C_b, cant.R_t, cant.C_1,
     cant.R_1, cant.tau_s, F, V, U)
 
@@ -135,7 +136,7 @@ function ss_cant_xv(f_c=0.05, Q=1000., k=1., F=u)
     F_x, F_tx
 end
 
-ss_cant_xv(cant::CantileverParams, F::Function=u, V::Function=u, U::Function=u) = ss_cant_xv(
+ss_cant_xv(cant::CantileverParams, F=u, V=u, U=u) = ss_cant_xv(
     cant.f_c, cant.Q, cant.k, F)
 
 
@@ -366,8 +367,8 @@ function raw_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
 end
 
 
-function make_Ftx_jac(ss_cant::Function, cant::CantileverParams,
-                      F::Function, V::Function, U::Function)
+function make_Ftx_jac(ss_cant, cant::CantileverParams,
+                      F, V, U)
     
     Fx, F_tx = ss_cant(cant, F, V, U)
     jac = jacobian(Fx)
@@ -405,7 +406,7 @@ function chunk_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
             li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
                        coeff_ratio=coeff_ratio, window="blackman")
             li[:phase](tf=0.)
-            global slock = lockin.FIRStateLock(li[:b], dec, li[:f0],
+            global slock = lockin.FIRStateLock(li[:fir], dec, li[:f0],
                                         -li[:mb][end], t0=-T_pre, fs=fs)
             slock[:filt](x)
         else
@@ -740,7 +741,7 @@ function chunk_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
             li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
                        coeff_ratio=coeff_ratio, window="blackman")
             li[:phase](tf=0.)
-            global slock = lockin.FIRStateLock(li[:b], dec, li[:f0],
+            global slock = lockin.FIRStateLock(li[:fir], dec, li[:f0],
                                         -li[:mb][end], t0=-T_pre, fs=fs)
             slock[:filt](x)
         else
@@ -751,7 +752,7 @@ function chunk_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
 
     tout = slock[:get_t]()
     A = abs(slock[:z_out])
-    phi = unwrap(angle(slock[:z_out]))
+    phi = DSP.unwrap(angle(slock[:z_out]))
     df = zeros(phi)
     df[2:end] = diff(phi) / (2pi)
     df[1] = df[2]
@@ -763,10 +764,13 @@ end
 
 function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
-                             T::Float64, dt::Float64; xdot::Function=ss_cant_1tc,
+                             T::Float64, dt::Float64; xdot=ss_cant_1tc,
                               V=u, U=u, coeff_ratio=8., V_append=0.01, U_append=0.005,
                              Tchunk=1000., f_dec::Float64=2*cant.f_c, 
-                             seed=-1, force_ratio=20., S_x=0., args...)
+                             seed=-1, force_ratio=20.,
+                             fp=nothing,
+                             fc=nothing,
+                             progressbar=nothing)
     fs = 1/dt
     const k_B = 1.38064852e-11
 
@@ -774,13 +778,12 @@ function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Fl
 
     sigma = sqrt(cant.k*k_B*cant.T/(pi*cant.Q*cant.f_c*dt_force))
 
-    sigma_x = S_x * sqrt(fs/2)
-
     if seed > 0
         srand(seed)
     end
 
-    force(t) = t >= 0. ? randn() * sigma : 0.
+
+    force(t) = randn() * sigma
 
     Ndec = trunc(Int, fs / f_dec)
 
@@ -814,17 +817,24 @@ function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Fl
         # may need to revert these changes for some unknown reason.
 
         t_equal = collect(Tendpts[i]:dt:Tendpts[i+1])
-        x = Dierckx.evaluate(spline, t_equal) + randn(size(t_equal))*sigma_x
+        x = Dierckx.evaluate(spline, t_equal)
 
         if i == 1
             push!(t_save, t[1])
             push!(y_save, _y[1])
             global li = lockin.LockIn(t_equal, x, fs)
-            li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
-                       coeff_ratio=coeff_ratio, window="blackman")
+            if (fp != nothing) && (fc != nothing)
+                li[:lock2](fp=fp, fc=fc,
+                       coeff_ratio=coeff_ratio,
+                       window="blackman")
+            else
+                li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
+                       coeff_ratio=coeff_ratio,
+                       window="blackman")
+            end
             li[:phase](tf=0.)
 
-            global slock = lockin.FIRStateLock(li[:b], Ndec, li[:f0],
+            global slock = lockin.FIRStateLock(li[:fir], Ndec, li[:f0corr],
                                         -li[:mb][end], t0=-T_pre, fs=fs)
 
             slock[:filt](x)
@@ -839,13 +849,17 @@ function chunk_all_sscant_sim_noise_outall(cant::CantileverParams, y0::Vector{Fl
             end
         end
 
+        if progressbar != nothing
+            next!(progressbar)
+        end
+
     end
 
     y_save_sq = squeeze_y(y_save)
 
     tout = slock[:get_t]()
     A = abs(slock[:z_out])
-    phi = unwrap(angle(slock[:z_out]))
+    phi = DSP.unwrap(angle(slock[:z_out]))
     df = zeros(phi)
     df[2:end] = diff(phi) / (2pi)
     df[1] = df[2]
@@ -857,10 +871,10 @@ end
 
 function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
-                             T::Float64, dt::Float64; xdot::Function=ss_cant_1tc,
+                             T::Float64, dt::Float64; xdot=ss_cant_1tc,
                               V=u, U=u, coeff_ratio=8.,
                              Tchunk=1000., f_dec=nothing, 
-                             seed=-1, force_ratio=20., args...)
+                             seed=-1, force_ratio=20., progressbar=nothing)
     fs = 1/dt
     k_B = 1.38064852e-11
 
@@ -875,7 +889,7 @@ function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
     force(t) = t >= 0. ? randn() * sigma : 0.
 
     if f_dec == nothing
-        f_dec = 2*cant.f_c
+        f_dec = fs
     end
 
     dec = trunc(Int, fs / f_dec)
@@ -885,7 +899,10 @@ function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
         push!(Tendpts, T)
     end
 
-    for i = 1:length(Tendpts)-1
+
+    N_Tendpts = length(Tendpts)-1
+
+    for i = 1:N_Tendpts
         N = round(Int, (Tendpts[i+1] - Tendpts[i])/dt_force) + 1
         t_force = linspace(Tendpts[i], Tendpts[i+1], N)
         F_spline = Dierckx.Spline1D(t_force, map(force, t_force),
@@ -896,31 +913,39 @@ function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
         F_tx, jac = make_Ftx_jac(xdot, cant, F, V, U)
 
         t, _y = ODE.ode23s(F_tx, y0, [Tendpts[i], Tendpts[i+1]],
-                           jacobian=jac; maxstep=dt*0.5)
+                           jacobian=jac, maxstep=dt*0.5)
         y = squeeze_y(_y)
 
         y0 = _y[end]
+
         spline = Dierckx.Spline1D(t, y[:, 1], k=3)
         t_equal = collect(Tendpts[i]:dt:Tendpts[i+1])
+
         x = Dierckx.evaluate(spline, t_equal)
 
         if i == 1
-            global li = lockin.LockIn(t_equal, x, fs)
+            li = lockin.LockIn(t_equal, x, fs)
             li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
                        coeff_ratio=coeff_ratio, window="blackman")
-            li[:phase](tf=0.)
-            global slock = lockin.FIRStateLock(li[:b], dec, li[:f0],
+
+            li[:phase]()
+            global slock = lockin.FIRStateLock(li[:fir], dec, li[:f0],
                                         -li[:mb][end], t0=-T_pre, fs=fs)
             slock[:filt](x)
         else
             slock[:filt](x[2:end])
+        end
+        
+
+        if progressbar != nothing
+            next!(progressbar)
         end
 
     end
 
     tout = slock[:get_t]()
     A = abs(slock[:z_out])
-    phi = unwrap(angle(slock[:z_out]))
+    phi = DSP.unwrap(angle(slock[:z_out]))
     df = zeros(phi)
     df[2:end] = diff(phi) / (2pi)
     df[1] = df[2]
@@ -933,10 +958,10 @@ end
 function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64, dt_out::Float64;
-                             xdot::Function=ss_cant_1tc,
+                             xdot=ss_cant_1tc,
                              V=u, U=u, coeff_ratio=8.,
                              Tchunk=1000., 
-                             seed=-1, force_ratio=20., args...)
+                             seed=-1, force_ratio=20., progressbar=nothing)
     fs = 1/dt
     k_B = 1.38064852e-11
 
@@ -955,11 +980,21 @@ function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Vector{Float6
         push!(Tendpts, T)
     end
 
+    N_Tendpts = length(Tendpts)-1
+
     t_collected = Vector{Float64}()
     x_collected = Vector{Float64}()
-    for i = 1:length(Tendpts)-1
+
+    Npts_expected = round(Int, (T+t_pre)/dt)
+
+    sizehint!(t_collected, Npts_expected)
+    sizehint!(x_collected, Npts_expected)
+
+    for i = 1:N_Tendpts
+
         N = round(Int, (Tendpts[i+1] - Tendpts[i])/dt_force) + 1
         t_force = linspace(Tendpts[i], Tendpts[i+1], N)
+
         F_spline = Dierckx.Spline1D(t_force, map(force, t_force),
                               k=3)
 
@@ -972,12 +1007,17 @@ function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Vector{Float6
         y = squeeze_y(_y)
 
         y0 = _y[end]
+
         spline = Dierckx.Spline1D(t, y[:, 1], k=3)
         t_equal = collect(Tendpts[i]:dt_out:Tendpts[i+1])
         x = Dierckx.evaluate(spline, t_equal)
         
         append!(t_collected, t_equal[2:end])
         append!(x_collected, x[2:end])
+
+        if progressbar != nothing
+            next!(progressbar)
+        end
 
     end
 
