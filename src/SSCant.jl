@@ -8,16 +8,47 @@ import DSP
 import Dierckx
 @pyimport lockin
 
-@doc "Fits a straight line through a set of points, `y = a₁ + a₂ * x`
+"Fits a straight line through a set of points, `y = a₁ + a₂ * x`
 
-From CurveFit.jl." ->
+From CurveFit.jl."
 linear_fit(x, y) = hcat(ones(x), x) \ y
 
-@doc """Zero function""" ->
+"""Zero function"""
 u(t) = 0
 
+"""
+Params
+------
+x: position
+v: velocity
+omega_c: angular frequency (optional)
+f_c: frequency (optional)
+"""
+function amplitude(x, v; omega_c=nothing, f_c=nothing)
+    if omega_c == nothing
+        omega_c = 2 * pi * f_c
+    end
+    (x.^2 + (v ./ omega_c).^2).^0.5
+end
 
-doc"""
+function phase(x, v; omega_c=nothing, f_c=nothing)
+    if omega_c == nothing
+        omega_c = 2 * pi * f_c
+    end
+    DSP.unwrap(atan2(-v./omega_c, x))
+end
+
+function fit_phase(t, phi)
+    mb = linear_fit(t, phi)
+    dphi = phi - (t * mb[2] + mb[1])
+    df = zeros(size(dphi))
+    df[2:end] = diff(dphi)
+
+    return dphi, df, mb[2] / (2*pi)
+end
+
+
+"""
 - f_c: cantilever frequency (0.05 MHz)
 - Q:  quality factor (1000)
 - k: spring constant (1 µN/µm)
@@ -140,37 +171,6 @@ ss_cant_xv(cant::CantileverParams, F=u, V=u, U=u) = ss_cant_xv(
     cant.f_c, cant.Q, cant.k, F)
 
 
-@doc """
-Params
-------
-x: position
-v: velocity
-omega_c: angular frequency (optional)
-f_c: frequency (optional)
-""" ->
-function amplitude(x, v; omega_c=nothing, f_c=nothing)
-    if omega_c == nothing
-        omega_c = 2 * pi * f_c
-    end
-    (x.^2 + (v ./ omega_c).^2).^0.5
-end
-
-function phase(x, v; omega_c=nothing, f_c=nothing)
-    if omega_c == nothing
-        omega_c = 2 * pi * f_c
-    end
-    DSP.unwrap(atan2(-v./omega_c, x))
-end
-
-function fit_phase(t, phi)
-    mb = linear_fit(t, phi)
-    dphi = phi - (t * mb[2] + mb[1])
-    df = zeros(size(dphi))
-    df[2:end] = diff(dphi)
-
-    return dphi, df, mb[2] / (2*pi)
-end
-
 type TimeSeries
     cant::CantileverParams
     y0
@@ -249,13 +249,6 @@ immutable DownsampledTimeSeriesRaw
     df::Vector{Float64}
 end
 
-# function ResampledTimeSeries(ts::TimeSeries, T_pre, dt)
-#     spline = Dierckx.Spline1D(ts.t, ts.x, k=3)
-#     t = -T_pre:dt:T
-#     x = A0 * pi(2*ts.f_c)
-#     x = Dierckx.evaluate(spline, t)
-# end
-
 
 function squeeze_y(y)
     y_out = zeros(Float64, length(y), length(y[1]))
@@ -281,46 +274,6 @@ Params
 - y0: array containing [x, v, q_t, q_1, x_5] at time zero
       The units are µm, µm / µs, pC, pC, unitless (percentage change)
 """
-# function run_sscant(cant::CantileverParams, y0, t_range; F=u, V=u, U=u, args...)
-
-#     F, F_tx = ss_cant_1tc(cant, F, V, U)
-#     jac_t = jacobian(F)
-#     t, _y = ODE.ode23s(F_tx, y0, t_range, jacobian=jac_t; args...)
-#     y = squeeze_y(_y)
-
-#     TimeSeries(cant, y0, t, y)
-# end
-
-# function resample_sscant(cant::CantileverParams, A0, phi0, T_pre, T, dt; V_t0=0, V_10=0, alpha_0=0, F=u, V=u, U=u, args...)
-#     fs = 1/dt
-#     N_pre = round(Int, T_pre / dt)
-#     t_pre = collect((-N_pre:0) * dt)
-#     x_pre = A0 * cospi(2*cant.f_c*t_pre + 2*phi0)
-
-#     F, F_tx = ss_cant_1tc(cant, F, V, U)
-#     jac_t = jacobian(F)
-#     y0 = [x_pre[end], 2*pi*cant.f_c*A0*sinpi(2*phi0),
-#           V_t0 * cant.C_b, V_10 * cant.C_1, alpha_0]
-
-#     t, _y = ODE.ode23s(F_tx, y0, [0., T], jacobian=jac_t; maxstep=dt*0.5, args...)
-#     y = squeeze_y(_y)
-
-#     ts = TimeSeries(cant, y0, t, y)
-#     N_post = trunc(Int, T / dt)
-#     t_post = collect((1:N_post) * dt)
-#     spline = Dierckx.Spline1D(ts.t, ts.x, k=3)
-#     t = [t_pre; t_post]
-#     x = [x_pre; Dierckx.evaluate(spline, t_post)]
-
-#     li = lockin.LockIn(t, x, fs)
-
-#     li[:lock](bw_ratio=0.25, coeff_ratio=5., window="blackmanharris")
-
-#     ResampledTimeSeries(cant, ts, dt, li[:m], t, x, li[:A],
-#                         li[:phi], li[:dphi], li[:df], li[:f0])
-
-# end
-
 function resample_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64;
@@ -340,7 +293,8 @@ function resample_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
 
     li = lockin.LockIn(t, x, fs)
 
-    li[:lock2](fp_ratio=0.1, fc_ratio=0.4, coeff_ratio=coeff_ratio, window="blackman")
+    li[:lock2](fp_ratio=0.1, fc_ratio=0.4,
+               coeff_ratio=coeff_ratio, window="blackman")
     li[:phase](tf=0.)
 
     ResampledTimeSeries(cant, ts, dt, li[:m], t, x, li[:A],
@@ -462,18 +416,6 @@ function downsample_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
                           li[:dec_f0], li[:mb][2], li[:dec_t],
                           li[:dec_A], li[:dec_phi], li[:dec_df])
 end
-
-# type DownsampledTimeSeries
-#     cant::CantileverParams
-#     y0::Vector{Float64}
-#     dt0::Float64
-#     fs::Float64
-#     f0::Float64
-#     t::Vector{Float64}
-#     A::Vector{Float64}
-#     phi::Vector{Float64}
-#     df::Vector{Float64}
-# end
 
 # Since a discrete delta function has a magnitude $\delta[0] = 1/\Delta t$,
 # we can model the thermal force on the cantilever as a random,
