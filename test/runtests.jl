@@ -28,7 +28,24 @@ function test_fit_phase()
     @test_approx_eq(f0, 0.25)
 end
 
+
+function test_get_specified()
+    x = 0:0.5:5
+    y = map(x -> x^2, x)
+    x_specified = 0:5
+    y_specified_exp =  map(x -> x^2, x_specified)
+    y_specified = SSCant.get_specified(x, y, x_specified)
+    @test_approx_eq(y_specified, y_specified_exp)
+end
+
+function test_chunk_range()
+    t0 = -10.
+    tf = 14.
+    @test_approx_eq(SSCant.chunk_range(t0, tf, 10.), [-10, 0.0, 10, 14])
+end
+
 test_amplitude()
 test_phase()
 test_fit_phase()
-
+test_get_specified()
+test_chunk_range()

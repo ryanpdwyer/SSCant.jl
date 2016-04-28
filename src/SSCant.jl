@@ -16,6 +16,31 @@ linear_fit(x, y) = hcat(ones(x), x) \ y
 """Zero function"""
 u(t) = 0
 
+
+"""
+get_specified(x, y, x_specified)
+For sorted x, x_specified, get y data points corresponding to x_specified.
+"""
+function get_specified(x, y, x_specified)
+    y_specified = Vector{eltype(y)}()
+    j = 1
+    for i = eachindex(x)
+        if x[i] == x_specified[j]
+            push!(y_specified, y[i])
+            j += 1
+        end
+    end
+    return y_specified
+end
+
+function chunk_range(t0, tf, Tchunk)
+    tchunks = collect(t0:Tchunk:tf)
+    if tchunks[end] != tf
+        push!(tchunks, tf)
+    end
+    return tchunks
+end
+
 """
 Params
 ------
@@ -150,6 +175,11 @@ end
 ss_cant_1tc(cant::CantileverParams, F=u, V=u, U=u) = ss_cant_1tc(cant.f_c,
     cant.Q, cant.k, cant.C_z, cant.C_zz, cant.C_b, cant.R_t, cant.C_1,
     cant.R_1, cant.tau_s, F, V, U)
+
+function init_steady_state_1tc(cp::SSCant.CantileverParams, A0, phi0, t0, V, U)
+    [A0*cos(phi0), -2*pi*cp.f_c*A0*sin(phi0),
+     cp.C_b*V(t0), cp.C_1*V(t0), U(t0)]
+end
 
 
 function ss_cant_xv(f_c=0.05, Q=1000., k=1., F=u)
@@ -541,7 +571,7 @@ function down_sscant_noise3(cant::CantileverParams, y0::Vector{Float64},
     N_force = round(Int, T/dt_force)+1
     N = round(Int, (T+T_pre)/dt_force)+1
 
-    force(t) = t >= 0. ? randn() * sigma : 0.
+    force(t) = randn() * sigma
     times = linspace(-T_pre, T, N)
     F_spline = Dierckx.Spline1D(times, map(force, times),
                               k=3)
@@ -577,6 +607,105 @@ function down_sscant_noise3(cant::CantileverParams, y0::Vector{Float64},
     return down
 
 end
+
+# Eliminate Spline interpolation of x. Use tspan argument instead.
+function down_sscant_noise4(cant::CantileverParams, y0::Vector{Float64},
+                             T_pre::Float64,
+                             T::Float64, dt::Float64;
+                             V=u, U=u, coeff_ratio=8., maxstep=dt*0.5,
+                             seed=-1, fs_force=20*cant.f_c, args...)
+    fs = 1/dt
+    k_B = 1.38064852e-11
+    t0 = -T_pre
+    tf = t0 + T
+
+    if seed > 0
+        srand(seed)
+    end
+
+    # Cut off force noise at 20•fc by default
+    dt_force = 1/fs_force
+    sigma = sqrt(cant.k*k_B*cant.T/(pi*cant.Q*cant.f_c*dt_force))
+
+    force(t) = randn() * sigma
+
+    times = t0:dt:tf
+    N_total = length(times)
+    N_force = round(Int, (times[end] - times[1])/dt_force)+1
+    t_force = linspace(times[1], times[end], N_force)
+    F_spline = Dierckx.Spline1D(t_force, map(force, t_force),
+                              k=3)
+
+    F(t) = Dierckx.evaluate(F_spline, t)
+
+    F_tx, jac_t = make_Ftx_jac(ss_cant_1tc, cant, F, V, U)
+    t, _y = ODE.ode23s(F_tx, y0, times, jacobian=jac_t; maxstep=maxstep, args...)
+    
+    _y_specified = get_specified(t, _y, times)
+    y_specified = squeeze_y(_y_specified)
+
+    return TimeSeries(cant, y0, times, y_specified)
+
+end
+
+
+# Eliminate Spline interpolation of x. Use tspan argument instead.
+function chunk_sscant_noise4(cant::CantileverParams, y0::Vector{Float64},
+                             T_pre::Float64,
+                             T::Float64, dt::Float64, Tchunk;
+                             V=u, U=u, coeff_ratio=8., maxstep=dt*0.5, seed=-1,
+                             fs_force=20*cant.f_c, args...)
+    fs = 1/dt
+    k_B = 1.38064852e-11
+    t0 = -T_pre
+    tf = t0 + T
+
+    if seed > 0
+        srand(seed)
+    end
+
+    # Cut off force noise at 20•fc by default
+    dt_force = 1/fs_force
+    sigma = sqrt(cant.k*k_B*cant.T/(pi*cant.Q*cant.f_c*dt_force))
+    force(t) = randn() * sigma
+
+
+    times = t0:dt:tf
+    N_total = length(times)
+    N_chunk_pts = Int(Tchunk/dt)
+    i_endpts = chunk_range(1, N_total, N_chunk_pts)
+
+    y_specified = Matrix{Float64}(N_total, length(y0))
+    y_specified[1, :] = y0
+
+    y1 = y0
+
+    for i in eachindex(i_endpts[1 : end-1])
+        j0 = i_endpts[i]
+        jf = i_endpts[i+1]
+        curr_times = times[j0 : jf]
+        curr_T = curr_times[end] - curr_times[1]
+        N_force = round(Int, curr_T/dt_force)+1
+        force_times = linspace(curr_times[1], curr_times[end], N_force)
+        F_spline = Dierckx.Spline1D(force_times, map(force, force_times), k=3)
+        F(t) = Dierckx.evaluate(F_spline, t)
+
+        F_tx, jac_t = make_Ftx_jac(ss_cant_1tc, cant, F, V, U)
+        
+        t, _y = ODE.ode23s(F_tx, y1, curr_times, jacobian=jac_t;
+                           points=:specified,
+                           maxstep=maxstep, args...)
+
+        y1 = _y[end]
+        
+        _y_specified = squeeze_y(_y)
+        y_specified[j0+1 : jf, :] = _y_specified[2 : end, :]
+    end
+
+    return TimeSeries(cant, y0, times, y_specified)
+
+end
+
 
 function sscant_noise3(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
