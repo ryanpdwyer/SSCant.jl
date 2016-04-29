@@ -41,6 +41,37 @@ function chunk_range(t0, tf, Tchunk)
     return tchunks
 end
 
+
+function make_spline(f, t0, tf, dt; k=3)
+    T = tf - t0
+    N = round(Int, T/dt) + 1
+    t = linspace(t0, tf, N)
+    ft = map(f, t)
+    F_spline = Dierckx.Spline1D(t, ft, k=k)
+    F(t) = Dierckx.evaluate(F_spline, t)
+    return F
+end
+
+
+function make_spline(f, t0, tf, dt, prev; k=3)
+    T = tf - t0
+    N = round(Int, T/dt) + 1
+    t = linspace(t0, tf, N)
+
+    ft = Vector{typeof(prev)}(length(t))
+    ft[1] = prev
+
+    for i = 2:length(t)
+        ft[i] = f(t[i])
+    end
+
+    F_spline = Dierckx.Spline1D(t, ft, k=k)
+    F(t) = Dierckx.evaluate(F_spline, t)
+
+    return F
+end
+
+
 """
 Params
 ------
@@ -176,11 +207,89 @@ ss_cant_1tc(cant::CantileverParams, F=u, V=u, U=u) = ss_cant_1tc(cant.f_c,
     cant.Q, cant.k, cant.C_z, cant.C_zz, cant.C_b, cant.R_t, cant.C_1,
     cant.R_1, cant.tau_s, F, V, U)
 
+
+"""
+Params
+------
+
+- f_c: cantilever frequency (0.05 MHz)
+- Q:  quality factor (1000)
+- k: spring constant (1 µN/µm)
+- C_z: first derivative of tip capacitance (1e-6 pF / µm)
+- C_zz: second derivative of tip capacitance (-1e-5 pF / µm)
+- C_b: cantilever body capacitance (0.1 pF)
+- R_t: Cantilever tip capacitance (1e-4 Mohm)
+- C_1: C1 capacitance (600 pF)
+- R_1: R1 resistance (3e-6 Mohm)
+- tau_s: sample response time (15e3 us)
+- F: Force as a function of time (µN)
+- V: Voltage as a function of time (V)
+- U: percentange change in capacitance (unitless)
+- Pn: Surface potential input (V/s)
+
+Returns
+-------
+
+"""
+function ss_cant_1tc_volt_noise(f_c=0.05, Q=1000., k=1,
+                 C_z=1e-6, C_zz=-1e-5, C_b=0.1,
+                 R_t=1e-4, C_1=600., R_1=3e-6,
+                 tau_s=15e3, F=u, V=u, U=u, Pn=u)
+
+    omega_c = 2*pi*f_c
+    omega_r = omega_c / Q
+    m = k / omega_c ^ 2
+    mC_b2 = m * C_b^2
+    
+    omega_11 = (C_1 * R_1)^-1
+    omega_t1 = (R_t * C_1)^-1
+    
+    omega_tb = (R_t * C_b)^-1
+    
+    F_x(x) = [x[2], (
+            -omega_c^2 * x[1] - omega_r * x[2]
+            - C_z/(2mC_b2) * (1 + x[5]) * x[3]^2
+            - C_zz/(2mC_b2) * (1 + x[5]) * x[1]*x[3]^2),
+                
+            (-omega_tb * x[3]
+            + C_z/(R_t * C_b^2) * (1 + x[5]) * x[1] * x[3]
+            + omega_t1 * x[4]),
+                
+            (omega_tb * x[3]
+            - C_z/(R_t * C_b^2) * (1 + x[5]) * x[1] * x[3]
+            - (omega_11 + omega_t1) * x[4]
+            - x[6] / R_1
+            ),
+                
+            -x[5] / tau_s,
+
+            0.0
+            ]
+    
+    function F_tx(t, x)
+        return F_x(x) + [0., F(t) / m, 0,
+                         V(t) / R_1, U(t) / tau_s, Pn(t)]
+    end
+    
+    F_x, F_tx
+end
+
+ss_cant_1tc_volt_noise(
+    cant::CantileverParams, F=u, V=u, U=u, Pn=u
+    ) = ss_cant_1tc_volt_noise(cant.f_c,
+    cant.Q, cant.k, cant.C_z, cant.C_zz, cant.C_b, cant.R_t, cant.C_1,
+    cant.R_1, cant.tau_s, F, V, U, Pn)
+
+
 function init_steady_state_1tc(cp::SSCant.CantileverParams, A0, phi0, t0, V, U)
     [A0*cos(phi0), -2*pi*cp.f_c*A0*sin(phi0),
      cp.C_b*V(t0), cp.C_1*V(t0), U(t0)]
 end
 
+function init_steady_state_1tc_volt_noise(cp::SSCant.CantileverParams, A0, phi0, t0, V, U, Pn)
+    [A0*cos(phi0), -2*pi*cp.f_c*A0*sin(phi0),
+     cp.C_b*V(t0), cp.C_1*V(t0), U(t0), Pn(t0)]
+end
 
 function ss_cant_xv(f_c=0.05, Q=1000., k=1., F=u)
 
@@ -216,7 +325,6 @@ type TimeSeries
     df
     f0
 end
-
 
 function TimeSeries(cant::CantileverParams, y0, t, y)
     x = y[:, 1]
@@ -351,10 +459,9 @@ function raw_sscant_sim(cant::CantileverParams, y0::Vector{Float64},
 end
 
 
-function make_Ftx_jac(ss_cant, cant::CantileverParams,
-                      F, V, U)
+function make_Ftx_jac(ss_cant, cant::CantileverParams, x...)
     
-    Fx, F_tx = ss_cant(cant, F, V, U)
+    Fx, F_tx = ss_cant(cant, x...)
     jac = jacobian(Fx)
 
     return F_tx, jac
@@ -630,19 +737,14 @@ function down_sscant_noise4(cant::CantileverParams, y0::Vector{Float64},
     force(t) = randn() * sigma
 
     times = t0:dt:tf
-    N_total = length(times)
-    N_force = round(Int, (times[end] - times[1])/dt_force)+1
-    t_force = linspace(times[1], times[end], N_force)
-    F_spline = Dierckx.Spline1D(t_force, map(force, t_force),
-                              k=3)
 
-    F(t) = Dierckx.evaluate(F_spline, t)
+    F = make_spline(force, times[1], times[end], dt_force)
 
     F_tx, jac_t = make_Ftx_jac(ss_cant_1tc, cant, F, V, U)
-    t, _y = ODE.ode23s(F_tx, y0, times, jacobian=jac_t; maxstep=maxstep, args...)
+    t, _y = ODE.ode23s(F_tx, y0, times, jacobian=jac_t; points=:specified,
+                       maxstep=maxstep, args...)
     
-    _y_specified = get_specified(t, _y, times)
-    y_specified = squeeze_y(_y_specified)
+    y_specified = squeeze_y(_y)
 
     return TimeSeries(cant, y0, times, y_specified)
 
@@ -679,16 +781,21 @@ function chunk_sscant_noise4(cant::CantileverParams, y0::Vector{Float64},
     y_specified[1, :] = y0
 
     y1 = y0
+    F_prev_endpoint = 0.
 
     for i in eachindex(i_endpts[1 : end-1])
         j0 = i_endpts[i]
         jf = i_endpts[i+1]
         curr_times = times[j0 : jf]
-        curr_T = curr_times[end] - curr_times[1]
-        N_force = round(Int, curr_T/dt_force)+1
-        force_times = linspace(curr_times[1], curr_times[end], N_force)
-        F_spline = Dierckx.Spline1D(force_times, map(force, force_times), k=3)
-        F(t) = Dierckx.evaluate(F_spline, t)
+
+        if i == 1
+            F = make_spline(force, curr_times[1], curr_times[end], dt_force)
+        else
+            F = make_spline(force, curr_times[1], curr_times[end], dt_force,
+                            F_prev_endpoint)
+        end
+
+        F_prev_endpoint = F(curr_times[end])
 
         F_tx, jac_t = make_Ftx_jac(ss_cant_1tc, cant, F, V, U)
         
@@ -703,6 +810,90 @@ function chunk_sscant_noise4(cant::CantileverParams, y0::Vector{Float64},
     end
 
     return TimeSeries(cant, y0, times, y_specified)
+
+end
+
+function N_chunks(T, Tchunk, dt, t0=0.)
+    times = t0:dt:(t0+T)
+    N_total = length(times)
+    N_chunk_pts = Int(Tchunk/dt)
+    i_endpts = chunk_range(1, N_total, N_chunk_pts)
+    return length(i_endpts)-1
+end
+
+# Add voltage noise term.
+function chunk_sscant_noise_volt_noise(cant::CantileverParams, y0::Vector{Float64},
+                             T_pre::Float64,
+                             T::Float64, dt::Float64, Tchunk;
+                             V=u, U=u, coeff_ratio=8., maxstep=dt*0.5, seed=-1,
+                             fs_force=20*cant.f_c, sigma_potential=1e-5,
+                             dt_potential=10., progressbar=nothing,args...)
+    fs = 1/dt
+    k_B = 1.38064852e-11
+    t0 = -T_pre
+    tf = t0 + T
+
+    if seed > 0
+        srand(seed)
+    end
+
+    # Cut off force noise at 20•fc by default
+    dt_force = 1/fs_force
+    sigma = sqrt(cant.k*k_B*cant.T/(pi*cant.Q*cant.f_c*dt_force))
+    force(t) = randn() * sigma
+    potential_noise(t) = randn() * sigma_potential
+
+    times = t0:dt:tf
+    N_total = length(times)
+    N_chunk_pts = Int(Tchunk/dt)
+    i_endpts = chunk_range(1, N_total, N_chunk_pts)
+
+    y_specified = Matrix{Float64}(N_total, length(y0))
+    y_specified[1, :] = y0
+
+    y1 = y0
+
+    F_prev =0.
+    Pn_prev = 0.
+
+    for i in eachindex(i_endpts[1 : end-1])
+        j0 = i_endpts[i]
+        jf = i_endpts[i+1]
+        curr_times = times[j0 : jf]
+
+        # Might be nice to properly handle endpoints, by using
+        # F_prev_endpoint as first function value. Then evaluate the function
+        # at t[2:end]
+        if i == 1
+            F = make_spline(force, curr_times[1], curr_times[end], dt_force)
+            Pn = make_spline(potential_noise, curr_times[1], curr_times[end],
+                         dt_potential)
+        else
+            F = make_spline(force, curr_times[1], curr_times[end], dt_force,
+                            F_prev)
+            Pn = make_spline(potential_noise, curr_times[1], curr_times[end],
+                         dt_potential, Pn_prev)
+        end
+        F_prev = F(curr_times[end])
+        Pn_prev = Pn(curr_times[end])
+
+        F_tx, jac_t = make_Ftx_jac(ss_cant_1tc_volt_noise, cant, F, V, U, Pn)
+        
+        t, _y = ODE.ode23s(F_tx, y1, curr_times, jacobian=jac_t;
+                           points=:specified,
+                           maxstep=maxstep, args...)
+
+        y1 = _y[end]
+
+        _y_specified = squeeze_y(_y)
+        y_specified[j0+1 : jf, :] = _y_specified[2 : end, :]
+
+        if progressbar != nothing
+            next!(progressbar)
+        end
+    end
+
+    return times, y_specified
 
 end
 
