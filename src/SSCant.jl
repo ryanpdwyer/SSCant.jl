@@ -461,9 +461,7 @@ function squeeze_y(y)
 end
 
 function jacobian(dx)
-    jac = ForwardDiff.jacobian(dx)
-
-    jac_t(t, x) = jac(x)
+    jac_t(t, x) = ForwardDiff.jacobian(dx, x)
 
     return jac_t
 end
