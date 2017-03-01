@@ -128,17 +128,18 @@ immutable CantileverParams
     R_1::Float64
     tau_s::Float64
     T::Float64
+    f_det::Float64
 end
 
 
 function CantileverParams(;f_c=0.05, Q=1000., k=1.,
                  C_z=1.6e-4, C_zz=-1.6e-5, C_b=0.1,
                  R_t=1e-4, C_1=600., R_1=3e-6,
-                 tau_s=15e3, T=293.)
+                 tau_s=15e3, T=293., f_det=0.2)
     CantileverParams(f_c, Q, k,
                  C_z, C_zz, C_b,
                  R_t, C_1, R_1,
-                 tau_s, T)
+                 tau_s, T, f_det)
 end
 
 
@@ -165,7 +166,7 @@ Returns
 
 """
 function ss_cant_1tc(f_c=0.05, Q=1000., k=1,
-                 C_z=1e-6, C_zz=-1e-5, C_b=0.1,
+                 C_z=-1e-6, C_zz=1e-5, C_b=0.1,
                  R_t=1e-4, C_1=600., R_1=3e-6,
                  tau_s=15e3, F=u, V=u, U=u)
 
@@ -181,8 +182,8 @@ function ss_cant_1tc(f_c=0.05, Q=1000., k=1,
     
     F_x(x) = [x[2], (
             -omega_c^2 * x[1] - omega_r * x[2]
-            - C_z/(2mC_b2) * (1 + x[5]) * x[3]^2
-            - C_zz/(2mC_b2) * (1 + x[5]) * x[1]*x[3]^2),
+            + C_z/(2mC_b2) * (1 + x[5]) * x[3]^2
+            + (C_zz - 2*C_z^2/C_b)/(2mC_b2) * (1 + x[5]) * x[1]*x[3]^2),
                 
             (-omega_tb * x[3]
             + C_z/(R_t * C_b^2) * (1 + x[5]) * x[1] * x[3]
@@ -290,6 +291,69 @@ function init_steady_state_1tc_volt_noise(cp::SSCant.CantileverParams, A0, phi0,
     [A0*cos(phi0), -2*pi*cp.f_c*A0*sin(phi0),
      cp.C_b*V(t0), cp.C_1*V(t0), U(t0), Pn(t0)]
 end
+
+
+function ss_cant_det(;f_c=0.05, k=1, Q=10000,
+                 C_z=1e-6, C_zz=-1e-5, C_b=0.1,
+                 R_t=1e-4, C_1=600., R_1=3e-6,
+                 tau_s=15e3, fdet=0.2, F=u, V=u, U=u, P=u)
+    
+    omega_det = 2*pi*fdet
+    omega_c = 2*pi*f_c
+    omega_r = omega_c / Q
+    m = k / omega_c ^ 2
+    mC_b2 = m * C_b^2
+    
+    omega_11 = (C_1 * R_1)^-1
+    omega_t1 = (R_t * C_1)^-1
+    
+    omega_tb = (R_t * C_b)^-1
+    
+    Ftx(t, x) = [x[2], 
+        (
+        -omega_c^2 * x[1] - omega_r  * x[2]
+            - C_z/(2mC_b2) * (1 + x[5]) * x[3]^2
+            - (C_zz - 2*C_z^2/C_b)/(2mC_b2) * (1 + x[5]) * x[1]*x[3]^2
+        
+        + F(t) / m
+        ),
+                
+            (-omega_tb * x[3]
+            + C_z/(R_t * C_b^2) * (1 + x[5]) * x[1] * x[3]
+            + omega_t1 * x[4]),
+                
+            (omega_tb * x[3]
+            - C_z/(R_t * C_b^2) * (1 + x[5]) * x[1] * x[3]
+            - (omega_11 + omega_t1) * x[4]
+            - x[6] / R_1
+            
+            + V(t) / R_1
+            ),
+                
+            -x[5] / tau_s + U(t) / tau_s,
+
+            P(t),
+            omega_det * (x[1] - x[7])
+            ]
+
+    Ftx
+end
+
+
+ss_cant_det(cant::SSCant.CantileverParams,
+F=u, V=u, U=u, P=u) = ss_cant_det(f_c = cant.f_c, k=cant.k, Q=cant.Q, C_z=cant.C_z,
+C_zz=cant.C_zz, C_b=cant.C_b, R_t=cant.R_t, C_1=cant.C_1, R_1=cant.R_1,
+tau_s=cant.tau_s, F=F, V=V, U=U, P=P, fdet=cant.f_det)
+
+
+function init_ss_cant_det(cant::SSCant.CantileverParams, A0, phi0, t0; V=u, U=u, P=u)
+    resp = 1 / (1 + cant.f_c * im / cant.f_det)
+    A_x = A0 / abs(resp)
+    phi_x = phi0 - angle(resp)
+    [A_x*cos(phi_x), -2*pi*cant.f_c*A_x*sin(phi_x), cant.C_b*V(t0),
+     cant.C_1*V(t0), U(t0), P(t0), A0*cos(phi0)]
+end
+
 
 function ss_cant_xv(f_c=0.05, Q=1000., k=1., F=u)
 
@@ -825,7 +889,7 @@ end
 function chunk_sscant_noise_volt_noise(cant::CantileverParams, y0::Vector{Float64},
                              T_pre::Float64,
                              T::Float64, dt::Float64, Tchunk;
-                             V=u, U=u, coeff_ratio=8., maxstep=dt*0.5, seed=-1,
+                             V=u, U=u, maxstep=dt*0.5, seed=-1,
                              fs_force=20*cant.f_c, sigma_potential=1e-5,
                              dt_potential=10., progressbar=nothing,args...)
     fs = 1/dt
@@ -839,7 +903,7 @@ function chunk_sscant_noise_volt_noise(cant::CantileverParams, y0::Vector{Float6
 
     # Cut off force noise at 20•fc by default
     dt_force = 1/fs_force
-    sigma = sqrt(cant.k*k_B*cant.T/(pi*cant.Q*cant.f_c*dt_force))
+    sigma = sqrt(cant.k * k_B * cant.T / (pi * cant.Q * cant.f_c * dt_force))
     force(t) = randn() * sigma
     potential_noise(t) = randn() * sigma_potential
 
@@ -855,6 +919,10 @@ function chunk_sscant_noise_volt_noise(cant::CantileverParams, y0::Vector{Float6
 
     F_prev =0.
     Pn_prev = 0.
+
+    if progressbar == true
+        progressbar = Progress(length(i_endpts[1 : end-1]))
+    end
 
     for i in eachindex(i_endpts[1 : end-1])
         j0 = i_endpts[i]
@@ -896,6 +964,173 @@ function chunk_sscant_noise_volt_noise(cant::CantileverParams, y0::Vector{Float6
     return times, y_specified
 
 end
+
+function make_jacobian(f)
+    jac(t, x) = ForwardDiff.jacobian(x_ -> f(t, x_), x)
+    return jac
+end
+
+# Add voltage noise term.
+function chunk_sscant_noise_volt_noise_det(cant::CantileverParams, y0::Vector{Float64},
+                             T_pre::Float64,
+                             T::Float64, dt::Float64, Tchunk;
+                             V=u, U=u, maxstep=dt*0.5, seed=-1,
+                             fs_force=20*cant.f_c, sigma_potential=1e-5,
+                             dt_potential=10., progressbar=nothing,args...)
+    fs = 1/dt
+    k_B = 1.38064852e-11
+    t0 = -T_pre
+    tf = t0 + T
+
+    if seed > 0
+        srand(seed)
+    end
+
+    # Cut off force noise at 20•fc by default
+    dt_force = 1/fs_force
+    sigma = sqrt(cant.k * k_B * cant.T / (pi * cant.Q * cant.f_c * dt_force))
+    force(t) = randn() * sigma
+    potential_noise(t) = randn() * sigma_potential
+
+    times = t0:dt:tf
+    N_total = length(times)
+    N_chunk_pts = Int(Tchunk/dt)
+    i_endpts = chunk_range(1, N_total, N_chunk_pts)
+
+    y_specified = Matrix{Float64}(N_total, length(y0))
+    y_specified[1, :] = y0
+
+    y1 = y0
+
+    F_prev =0.
+    Pn_prev = 0.
+
+    for i in eachindex(i_endpts[1 : end-1])
+        j0 = i_endpts[i]
+        jf = i_endpts[i+1]
+        curr_times = times[j0 : jf]
+
+        # Might be nice to properly handle endpoints, by using
+        # F_prev_endpoint as first function value. Then evaluate the function
+        # at t[2:end]
+        if i == 1
+            F = make_spline(force, curr_times[1], curr_times[end], dt_force)
+            Pn = make_spline(potential_noise, curr_times[1], curr_times[end],
+                         dt_potential)
+        else
+            F = make_spline(force, curr_times[1], curr_times[end], dt_force,
+                            F_prev)
+            Pn = make_spline(potential_noise, curr_times[1], curr_times[end],
+                         dt_potential, Pn_prev)
+        end
+        F_prev = F(curr_times[end])
+        Pn_prev = Pn(curr_times[end])
+
+        F_tx = ss_cant_det(cant, u, V, U, Pn)
+        jac_t = make_jacobian(F_tx)
+        
+        t, _y = ODE.ode23s(F_tx, y1, curr_times, jacobian=jac_t;
+                           points=:specified,
+                           maxstep=maxstep, args...)
+
+        y1 = _y[end]
+
+        _y_specified = squeeze_y(_y)
+        y_specified[j0+1 : jf, :] = _y_specified[2 : end, :]
+
+        if progressbar != nothing
+            next!(progressbar)
+        end
+    end
+
+    return times, y_specified
+
+end
+
+# # Add voltage noise term.
+# function chunk_sscant_noise_volt_noise_sep_pulse(cant::CantileverParams, y0::Vector{Float64},
+#                              T_pre::Float64,
+#                              T::Float64, dt::Float64, Tchunk, tp;
+#                              V=u, U=u, maxstep=dt*0.5, seed=-1,
+#                              fs_force=20*cant.f_c, sigma_potential=1e-5,
+#                              dt_potential=10., progressbar=nothing,args...)
+#     fs = 1/dt
+#     k_B = 1.38064852e-11
+#     t0 = -T_pre
+#     tf = t0 + T
+
+#     if seed > 0
+#         srand(seed)
+#     end
+
+#     # Cut off force noise at 20•fc by default
+#     dt_force = 1/fs_force
+#     sigma = sqrt(cant.k * k_B * cant.T / (pi * cant.Q * cant.f_c * dt_force))
+#     force(t) = randn() * sigma
+#     potential_noise(t) = randn() * sigma_potential
+
+#     times = t0:dt:tf
+
+#     N_total = length(times)
+#     N_chunk_pts = Int(Tchunk/dt)
+#     i_endpts = chunk_range(1, N_total, N_chunk_pts)
+
+#     y_specified = Matrix{Float64}(N_total, length(y0))
+#     y_specified[1, :] = y0
+
+#     y1 = y0
+
+#     F_prev =0.
+#     Pn_prev = 0.
+
+#     i=1
+#     pulse_
+
+
+
+#     while i < length(i_endpts[1 : end-1])
+#         j0 = i_endpts[i]
+#         jf = i_endpts[i+1]
+#         curr_times = times[j0 : jf]
+#         curr_ti = curr_times[1]
+#         curr_tf = curr_times[end]
+
+#         # Might be nice to properly handle endpoints, by using
+#         # F_prev_endpoint as first function value. Then evaluate the function
+#         # at t[2:end]
+#         if i == 1
+#             F = make_spline(force, curr_times[1], curr_times[end], dt_force)
+#             Pn = make_spline(potential_noise, curr_times[1], curr_times[end],
+#                          dt_potential)
+#         else
+#             F = make_spline(force, curr_times[1], curr_times[end], dt_force,
+#                             F_prev)
+#             Pn = make_spline(potential_noise, curr_times[1], curr_times[end],
+#                          dt_potential, Pn_prev)
+#         end
+#         F_prev = F(curr_times[end])
+#         Pn_prev = Pn(curr_times[end])
+
+#         F_tx, jac_t = make_Ftx_jac(ss_cant_1tc_volt_noise, cant, F, V, U, Pn)
+        
+#         t, _y = ODE.ode23s(F_tx, y1, curr_times, jacobian=jac_t;
+#                            points=:specified,
+#                            maxstep=maxstep, args...)
+
+#         y1 = _y[end]
+
+#         _y_specified = squeeze_y(_y)
+#         y_specified[j0+1 : jf, :] = _y_specified[2 : end, :]
+
+#         if progressbar != nothing
+#             next!(progressbar)
+#         end
+#     end
+
+#     return times, y_specified
+
+# end
+
 
 
 function sscant_noise3(cant::CantileverParams, y0::Vector{Float64},
@@ -1164,6 +1399,10 @@ function chunk_all_sscant_sim_noise(cant::CantileverParams, y0::Vector{Float64},
 
     N_Tendpts = length(Tendpts)-1
 
+    if progressbar == true
+        progressbar = Progress(N_Tendpts)
+    end
+
     for i = 1:N_Tendpts
         N = round(Int, (Tendpts[i+1] - Tendpts[i])/dt_force) + 1
         t_force = linspace(Tendpts[i], Tendpts[i+1], N)
@@ -1227,6 +1466,8 @@ function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Vector{Float6
     fs = 1/dt
     k_B = 1.38064852e-11
 
+
+
     dt_force = 1./(cant.f_c * force_ratio)
 
     sigma = sqrt(cant.k*k_B*cant.T/(pi*cant.Q*cant.f_c*dt_force))
@@ -1243,6 +1484,10 @@ function chunk_all_sscant_sim_brownian(cant::CantileverParams, y0::Vector{Float6
     end
 
     N_Tendpts = length(Tendpts)-1
+
+    if progressbar == true
+        progressbar = Progress(N_Tendpts)
+    end
 
     t_collected = Vector{Float64}()
     x_collected = Vector{Float64}()
